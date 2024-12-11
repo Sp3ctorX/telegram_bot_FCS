@@ -1,13 +1,14 @@
 import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, Message
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from datetime import datetime, timedelta
 
 TOKEN = ""  # Замените на ваш токен
-ADMIN_ID = 0    # Замените на ID администратора
+ADMIN_ID =     # Замените на ID администратора
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -21,6 +22,13 @@ class BD:
             CREATE TABLE IF NOT EXISTS teleusers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE
+            )
+        """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                last_request_time TEXT
             )
         """)
         self.conn.commit()
@@ -44,6 +52,20 @@ class BD:
         self.cursor.execute("DELETE FROM teleusers WHERE username = ?", (username,))
         self.conn.commit()
 
+    def can_request_access(self, username):
+        self.cursor.execute("SELECT last_request_time FROM requests WHERE username = ?", (username,))
+        result = self.cursor.fetchone()
+        if result:
+            last_request_time = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
+            if datetime.now() - last_request_time < timedelta(days=1):
+                return False
+        return True
+
+    def update_request_time(self, username):
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.cursor.execute("INSERT OR REPLACE INTO requests (username, last_request_time) VALUES (?, ?)", (username, current_time))
+        self.conn.commit()
+
 class AdminActions(StatesGroup):
     waiting_for_add_username = State()
     waiting_for_remove_username = State()
@@ -54,16 +76,39 @@ def admin_keyboard():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[button1, button2]])
     return keyboard
 
+def request_access_keyboard():
+    button = KeyboardButton(text="Запросить доступ")
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[button]])
+    return keyboard
+
+def user_keyboard():
+    button1 = InlineKeyboardButton(text="Ссылка 1", url="https://example.com/link1")
+    button2 = InlineKeyboardButton(text="Ссылка 2", url="https://example.com/link2")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[button1, button2]])
+    return keyboard
+
 @dp.message(CommandStart())
 async def start(message: Message):
     db = BD()
     username = message.from_user.username
     if db.user_exists(username):
-        await message.answer("Вы уже зарегистрированы.")
+        await message.answer("Вы уже зарегистрированы.", reply_markup=user_keyboard())
     elif message.from_user.id == ADMIN_ID:
         await message.answer("Вы администратор. Для добавления или удаления пользователя используйте кнопки ниже.", reply_markup=admin_keyboard())
     else:
-        await message.answer("Вы не добавлены в систему. Обратитесь к администратору.")
+        await message.answer("Вы не добавлены в систему. Нажмите кнопку ниже, чтобы запросить доступ.", reply_markup=request_access_keyboard())
+    db.close()
+
+@dp.message(F.text == "Запросить доступ")
+async def request_access(message: Message):
+    db = BD()
+    username = message.from_user.username
+    if db.can_request_access(username):
+        db.update_request_time(username)
+        await bot.send_message(ADMIN_ID, f"Пользователь с username {username} запрашивает доступ.")
+        await message.answer("Ваш запрос на доступ отправлен администратору.")
+    else:
+        await message.answer("Вы уже отправляли запрос на доступ в течение последних 24 часов. Пожалуйста, подождите и попробуйте снова позже.")
     db.close()
 
 @dp.message(F.text == "Добавить пользователя")
@@ -85,7 +130,7 @@ async def add_user_from_input(message: Message, state: FSMContext):
     if db.add_user(username):
         await message.reply(f"Пользователь с username {username} успешно добавлен!")
         # Уведомляем пользователя о том, что он добавлен
-        await bot.send_message(username, "Вы успешно добавлены в систему! Теперь вы можете использовать бота.")
+        await bot.send_message(username, "Вы успешно добавлены в систему! Теперь вы можете использовать бота.", reply_markup=user_keyboard())
     else:
         await message.reply(f"Пользователь с username {username} уже существует или ошибка добавления.")
     db.close()
@@ -108,9 +153,9 @@ async def handle_message(message: types.Message):
     db = BD()
     username = message.from_user.username
     if db.user_exists(username):
-        await message.answer(f"Вы авторизованы. Ваше сообщение: {message.text}")
+        await message.answer(f"Вы авторизованы. Ваше сообщение: {message.text}", reply_markup=user_keyboard())
     else:
-        await message.answer("Вы не добавлены в систему. Обратитесь к администратору.")
+        await message.answer("Вы не добавлены в систему. Обратитесь к администратору.", reply_markup=request_access_keyboard())
     db.close()
 
 if __name__ == "__main__":
